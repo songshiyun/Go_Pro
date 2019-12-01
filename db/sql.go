@@ -153,6 +153,10 @@ func (db *DB) Close() (err error) {
 	}
 	return
 }
+func (db *DB) SetMaster() {
+	db.master = true
+}
+
 func (db *DB) readIndex() int {
 	if len(db.read) == 0 {
 		return 0
