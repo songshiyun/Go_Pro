@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"golang.org/x/tools/go/ssa/interp/testdata/src/fmt"
 	"sync/atomic"
 )
 
@@ -21,8 +22,8 @@ var (
 )
 
 type DB struct {
-	write            []*conn
-	read             []*conn
+	write            map[string][]*conn
+	read             map[string][]*conn
 	serviceTimeStamp uint32
 	dbSet            []string
 	master           bool //todo 放哪里
@@ -93,62 +94,99 @@ type Stmt struct {
 	//stmt atomic.Value
 }
 
-func (db *DB) Begin(c context.Context) (tx *Tx, err error) {
+func (db *DB) Begin(dbName string, c context.Context) (tx *Tx, err error) {
 	//todo read master
+	wconn, ok := db.write[dbName]
+	if !ok {
+		return nil, errors.New(fmt.Sprintf("conn not exist,db_name: %s", dbName))
+	}
 	//master是个数组???
-	return db.write[0].begin(c)
+	return wconn[0].begin(c)
 }
 
 // Exec executes a query without returning any rows.
 // The args are for any placeholder parameters in the query.
-func (db *DB) Exec(c context.Context, query string, args ...interface{}) (res sql.Result, err error) {
+func (db *DB) Exec(dbName string, c context.Context, query string, args ...interface{}) (res sql.Result, err error) {
 	//todo 选择其中一个master实例执行
-	return db.write[0].Exec(query, args)
+	wconn, ok := db.write[dbName]
+	if !ok {
+		return nil, errors.New(fmt.Sprintf("conn not exist,db_name: %s", dbName))
+	}
+	//master是个数组???
+	return wconn[0].Exec(query, args)
 }
 
 // Prepare creates a prepared statement for later queries or executions.
 // Multiple queries or executions may be run concurrently from the returned
 // statement. The caller must call the statement's Close method when the
 // statement is no longer needed.
-func (db *DB) Prepare(query string) (*Stmt, error) {
+func (db *DB) Prepare(dbName, query string) (*Stmt, error) {
 	////todo 选择其中一个master实例执行
-	return db.write[0].prepare(query)
+	wconn, ok := db.write[dbName]
+	if !ok {
+		return nil, errors.New(fmt.Sprintf("conn not exist,db_name: %s", dbName))
+	}
+	return wconn[0].prepare(query)
 }
 
 // Query executes a query that returns rows, typically a SELECT. The args are
 // for any placeholder parameters in the query.
-func (db *DB) Query(c context.Context, query string, args ...interface{}) (rows *Rows, err error) {
+func (db *DB) Query(c context.Context, dbName, query string, args ...interface{}) (rows *Rows, err error) {
 	idx := db.readIndex()
-	for i := range db.read {
-		if rows, err = db.read[(idx+i)%len(db.read)].query(c, query, args...); err == nil {
+	rdb, ok := db.read[dbName]
+	if !ok || len(rdb) == 0 {
+		return nil, errors.New(fmt.Sprintf("conn not exist,db name: %s", dbName))
+	}
+	for i := range rdb {
+		if rows, err = rdb[(idx+i)%len(db.read)].query(c, query, args...); err == nil {
 			return
 		}
 	}
-	return db.write[0].query(c, query, args...)
+	wdb, ok := db.write[dbName]
+	if !ok || len(wdb) == 0 {
+		return nil, errors.New(fmt.Sprintf("conn not exist,db name: %s", dbName))
+	}
+	return wdb[0].query(c, query, args...)
 }
 
 // QueryRow executes a query that is expected to return at most one row.
 // QueryRow always returns a non-nil value. Errors are deferred until Row's
 // Scan method is called.
-func (db *DB) QueryRow(c context.Context, query string, args ...interface{}) *Row {
+func (db *DB) QueryRow(c context.Context, dbName, query string, args ...interface{}) *Row {
 	idx := db.readIndex()
-	for i := range db.read {
-		if row := db.read[(idx+i)%len(db.read)].queryRow(c, query, args...); err == nil {
+	rdb, ok := db.read[dbName]
+	if !ok || len(rdb) == 0 {
+		return nil
+	}
+	for i := range rdb {
+		if row := rdb[(idx+i)%len(db.read)].queryRow(c, query, args...); row.err == nil {
 			return row
 		}
 	}
-	return db.write[0].queryRow(c, query, args...)
+	wdb, ok := db.write[dbName]
+	if !ok || len(wdb) == 0 {
+		return nil
+	}
+	return wdb[0].queryRow(c, query, args...)
 }
 
 func (db *DB) Close() (err error) {
-	for _, wd := range db.write {
-		if e := wd.DB.Close(); e != nil {
-			err = e
+	for _, wdb := range db.write {
+		if len(wdb) != 0 {
+			for _, idb := range wdb {
+				if e := idb.Close(); e != nil {
+					err = e
+				}
+			}
 		}
 	}
-	for _, wd := range db.read {
-		if e := wd.DB.Close(); e != nil {
-			err = e
+	for _, wdb := range db.read {
+		if len(wdb) != 0 {
+			for _, idb := range wdb {
+				if e := idb.Close(); e != nil {
+					err = e
+				}
+			}
 		}
 	}
 	return
