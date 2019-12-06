@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"fmt"
 	"reflect"
 	"strconv"
@@ -20,8 +21,16 @@ func ParsePlaceHolderSqlToRaws(query string, args []interface{}) (string, error)
 	if err != nil {
 		return "", err
 	}
+	values, err := namedValueToValue(namedArgs)
+	if err != nil {
+		return "", err
+	}
+	return interpolateParams(query, values)
+}
+
+func interpolateParams(query string, args []driver.Value) (string, error) {
 	if strings.Count(query, "?") != len(args) {
-		return "", fmt.Errorf("sql: expected %d arguments, got %d", strings.Count(query, "?"), len(namedArgs))
+		return "", fmt.Errorf("sql: expected %d arguments, got %d", strings.Count(query, "?"), len(args))
 	}
 	var buf []byte
 	buf = buf[:0]
@@ -332,6 +341,17 @@ func callValuerValue(vr driver.Valuer) (v driver.Value, err error) {
 		return nil, nil
 	}
 	return vr.Value()
+}
+
+func namedValueToValue(named []driver.NamedValue) ([]driver.Value, error) {
+	dargs := make([]driver.Value, len(named))
+	for n, param := range named {
+		if len(param.Name) > 0 {
+			return nil, errors.New("sql: driver does not support the use of Named Parameters")
+		}
+		dargs[n] = param.Value
+	}
+	return dargs, nil
 }
 
 func validateNamedValueName(name string) error {
